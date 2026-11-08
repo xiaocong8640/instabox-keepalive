@@ -1,0 +1,48 @@
+name: instabox-keepalive
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  keepalive:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Lease activity + auto resume
+        env:
+          IBX: ${{ secrets.INSTABOX_API_KEY }}
+        run: |
+          set -euo pipefail
+          API=https://api.instabox.sh
+          info() { curl -sS -H "X-API-Key: $IBX" "$API/v1/machines"; }
+          ID=$(info | jq -r '.machines[0].id')
+          ST=$(info | jq -r '.machines[0].state')
+          STARTED=$(info | jq -r '.machines[0].runStartedAt')
+          echo "machine=$ID state=$ST started=$STARTED"
+
+          if [ "$ST" != "running" ]; then
+            echo "::notice::machine is $ST, waking"
+            curl -sS -X POST -H "X-API-Key: $IBX" "$API/v1/machines/$ID/resume" || \
+            curl -sS -X POST -H "X-API-Key: $IBX" "$API/v1/machines/$ID/start" || true
+            sleep 12
+          fi
+
+          MIN=$(( ( $(date -u +%s) - $(date -u -d "$STARTED" +%s) ) / 60 ))
+          echo "running for ${MIN} min"
+          if [ "$ST" = "running" ] && [ "$MIN" -gt 100 ]; then
+            echo "::notice::recycling to reset the per-run cap"
+            curl -sS -X POST -H "X-API-Key: $IBX" "$API/v1/machines/$ID/suspend" || true
+            sleep 8
+            curl -sS -X POST -H "X-API-Key: $IBX" "$API/v1/machines/$ID/resume" || true
+            sleep 12
+          fi
+
+          curl -sS -X PUT -H "X-API-Key: $IBX" -H "Content-Type: application/json" \
+            -d '{"ttlSeconds":1800}' "$API/v1/machines/$ID/activity-leases/keepalive"
+          echo
+          echo "lease renewed"
